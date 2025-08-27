@@ -1,7 +1,4 @@
-# Forzar una versión de Python estable
-python_version == "3.11"
-
-# Librerías de la aplicación
+# requirements.txt (Corregido)
 streamlit
 pandas
 langchain-google-genai
@@ -10,7 +7,5 @@ langchain-community
 SQLAlchemy
 PyMySQL
 google-generativeai
-
-# Nueva librería de audio
 streamlit-webrtc
 pydub
