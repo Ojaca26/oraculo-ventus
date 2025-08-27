@@ -30,7 +30,7 @@ def get_database_connection():
             db_pass = st.secrets["db_credentials"]["password"]
             db_host = st.secrets["db_credentials"]["host"]
             db_name = st.secrets["db_credentials"]["database"]
-            uri = f"mysql+pymymysql://{db_user}:{db_pass}@{db_host}/{db_name}"
+            uri = f"mysql+pymysql://{db_user}:{db_pass}@{db_host}/{db_name}"
             db = SQLDatabase.from_uri(uri, include_tables=["ventus", "ventus_rubro"])
             st.success("✅ Conexión a la base de datos establecida.")
             return db
@@ -269,3 +269,4 @@ if prompt := st.chat_input("Ej: 'Muéstrame la facturación total por rubro'"):
         if response_content:
             assistant_message = {"role": "assistant", "content": response_content}
             st.session_state.messages.append(assistant_message)
+
