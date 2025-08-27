@@ -1,20 +1,23 @@
-# app.py (versión final con entrada de voz)
+# app.py (versión final con streamlit-webrtc para audio)
 
 import streamlit as st
 import pandas as pd
 import re
 import io
-from sqlalchemy import text
+import av # NUEVO: Librería para manejar frames de audio
+import numpy as np
+from scipy.io.wavfile import write
 
-# NUEVO: Importaciones para audio y transcripción
-from audiorecorder import audiorecorder
 import google.generativeai as genai
-
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_community.utilities import SQLDatabase
 from langchain_community.agent_toolkits.sql.base import create_sql_agent
 from langchain_community.agent_toolkits.sql.toolkit import SQLDatabaseToolkit
 from langchain.chains import create_sql_query_chain
+from sqlalchemy import text
+
+# NUEVO: Importaciones para la nueva librería de audio
+from streamlit_webrtc import webrtc_streamer, WebRtcMode, AudioProcessorBase
 
 # ============================================
 # 0) Configuración de la Página
@@ -49,9 +52,7 @@ def get_llms():
     with st.spinner("🧠 Inicializando modelos de IA..."):
         try:
             api_key = st.secrets["google_api_key"]
-            # NUEVO: Configuración de la API de google-generativeai para transcripción
             genai.configure(api_key=api_key)
-            
             llm_sql = ChatGoogleGenerativeAI(model="models/gemini-1.5-pro", temperature=0.0, google_api_key=api_key)
             llm_analista = ChatGoogleGenerativeAI(model="models/gemini-1.5-pro", temperature=0.3, google_api_key=api_key)
             llm_orq = ChatGoogleGenerativeAI(model="models/gemini-1.5-pro", temperature=0.0, google_api_key=api_key)
@@ -74,11 +75,12 @@ def get_sql_agent(_llm, _db):
 
 agente_sql = get_sql_agent(llm_sql, db)
 
+
 # ============================================
-# 2) Funciones de Agentes (Lógica Principal con Mejoras)
+# 2) Funciones de Agentes y Lógica
 # ============================================
 
-# ... (Las funciones markdown_table_to_df, _df_preview, limpiar_y_extraer_sql no cambian)
+# ... (Las funciones markdown_table_to_df, _df_preview, limpiar_y_extraer_sql, etc., no cambian)
 def markdown_table_to_df(texto: str) -> pd.DataFrame:
     lineas = [l.strip() for l in texto.splitlines() if l.strip().startswith('|')]
     if not lineas: return pd.DataFrame()
@@ -105,40 +107,11 @@ def limpiar_y_extraer_sql(texto_con_sql: str) -> str:
         return sql_puro.strip()
     return texto_con_sql
 
-# NUEVO: Función para transcribir audio
-def transcribir_audio_con_gemini(audio_bytes):
-    """Envía el audio a Gemini 1.5 Pro y devuelve la transcripción."""
-    st.info("🎤 Transcribiendo audio...", icon="🎧")
-    with st.spinner("Procesando tu voz..."):
-        try:
-            # Sube el audio directamente desde los bytes en memoria
-            audio_file = genai.upload_file(
-                path=io.BytesIO(audio_bytes),
-                display_name="grabacion_usuario",
-                mime_type="audio/wav"
-            )
-            
-            # Llama al modelo para que transcriba
-            model = genai.GenerativeModel('models/gemini-1.5-pro-latest')
-            response = model.generate_content(["Por favor, transcribe este audio.", audio_file])
-            
-            # Limpia el archivo subido para no acumularlos
-            genai.delete_file(audio_file.name)
-            
-            st.success("✅ Transcripción completada.")
-            return response.text.strip()
-        except Exception as e:
-            st.error(f"Error al transcribir el audio: {e}", icon="🚨")
-            return None
-
 def extraer_pregunta_para_sql(pregunta_compleja: str) -> str:
-    # ... (Sin cambios)
     st.info("🧠 Reformulando la pregunta para el agente de SQL...", icon="🤔")
     prompt_extractor = f"""
-    A partir de la siguiente solicitud de un usuario, extrae únicamente la pregunta específica sobre los datos que se necesita para responderla.
-    Tu objetivo es crear una pregunta clara y concisa que pueda ser respondida con una consulta SQL.
-    Por ejemplo, si el usuario pide "Analiza el comportamiento de la facturación de este año", tu deberías extraer "dame la facturación de este año".
-    Si pide "Cuál es la tendencia de ventas del último trimestre", extrae "dame las ventas del último trimestre".
+    A partir de la siguiente solicitud, extrae únicamente la pregunta sobre los datos.
+    Ejemplo: "Analiza la facturación de este año" -> "dame la facturación de este año".
     Solicitud original: "{pregunta_compleja}"
     Extrae la pregunta para la base de datos:
     """
@@ -147,13 +120,10 @@ def extraer_pregunta_para_sql(pregunta_compleja: str) -> str:
     return pregunta_extraida
 
 def ejecutar_sql_real(pregunta_usuario: str):
-    # ... (Sin cambios)
     st.info("🤖 Traduciendo tu pregunta a consulta SQL...", icon="➡️")
     prompt = f"""
-    Considerando la pregunta del usuario, genera una consulta SQL para la base de datos MariaDB.
-    IMPORTANTE:
-    1. NUNCA limites los resultados (NO uses LIMIT) a menos que el usuario pida explícitamente un número pequeño de filas.
-    2. Si la pregunta es abierta, asume que el usuario quiere ver todos los registros relevantes.
+    Genera una consulta SQL para MariaDB.
+    IMPORTANTE: No uses LIMIT a menos que el usuario pida un número específico de filas.
     Pregunta original: "{pregunta_usuario}"
     """
     try:
@@ -161,19 +131,18 @@ def ejecutar_sql_real(pregunta_usuario: str):
         respuesta_llm = query_chain.invoke({"question": prompt})
         sql_query = limpiar_y_extraer_sql(respuesta_llm)
         st.code(sql_query, language='sql')
-        with st.spinner("⏳ Ejecutando consulta en la base de datos..."):
+        with st.spinner("⏳ Ejecutando consulta..."):
             with db._engine.connect() as conn:
                 df = pd.read_sql(text(sql_query), conn)
         st.success("✅ ¡Consulta ejecutada!")
         return {"sql": sql_query, "df": df, "texto": None}
     except Exception as e:
-        st.warning(f"⚠️ La consulta directa falló. Intentando método alternativo... (Error: {e})", icon="⚙️")
+        st.warning(f"⚠️ La consulta directa falló. Intentando plan B... (Error: {e})", icon="⚙️")
         return {"sql": None, "df": None, "error": str(e)}
 
 def ejecutar_sql_en_lenguaje_natural(pregunta_usuario: str):
-    # ... (Sin cambios)
     st.info("🤔 Activando agente SQL experto como plan B...", icon="➡️")
-    prompt = f'Responde consultando la BD. Devuelve un resultado legible en tabla/resumen. Pregunta: "{pregunta_usuario}"'
+    prompt = f'Responde consultando la BD en formato tabla. Pregunta: "{pregunta_usuario}"'
     try:
         with st.spinner("💬 Consultando con el agente experto..."):
             res = agente_sql.invoke(prompt)
@@ -190,7 +159,6 @@ def ejecutar_sql_en_lenguaje_natural(pregunta_usuario: str):
         return {"texto": f"[SQL_ERROR] {e}", "df": pd.DataFrame()}
 
 def analizar_con_datos(pregunta_usuario: str, df: pd.DataFrame):
-    # ... (Sin cambios)
     st.info("🧠 Analista experto examinando los datos...", icon="➡️")
     df_resumen = _df_preview(df)
     prompt_analisis = f"""
@@ -217,26 +185,22 @@ Entregar el resultado en 3 bloques:
     return analisis
 
 def clasificar_intencion(pregunta: str) -> str:
-    # ... (Sin cambios)
-    prompt_orq = f'Devuelve UNA sola palabra: `consulta` (si pide datos) o `analista` (si pide interpretar/analizar). Mensaje: "{pregunta}"'
+    prompt_orq = f'Devuelve `consulta` (si pide datos) o `analista` (si pide interpretar). Mensaje: "{pregunta}"'
     clasificacion = llm_orq.invoke(prompt_orq).content.strip().lower().replace('"', '').replace("'", "")
     return "analista" if "analista" in clasificacion else "consulta"
 
 def obtener_datos_sql(pregunta_usuario: str) -> dict:
-    # ... (Sin cambios)
     res_real = ejecutar_sql_real(pregunta_usuario)
     if res_real.get("df") is not None and not res_real["df"].empty:
         return res_real
     return ejecutar_sql_en_lenguaje_natural(pregunta_usuario)
 
 def orquestador(pregunta_usuario: str, historial_chat: list):
-    # ... (Sin cambios)
     with st.expander("⚙️ Ver Proceso del Agente", expanded=False):
         st.info(f"🚀 Recibido: '{pregunta_usuario}'")
         with st.spinner("🔍 Analizando tu pregunta..."):
             clasificacion = clasificar_intencion(pregunta_usuario)
         st.success(f"✅ Tarea detectada: {clasificacion.upper()}.")
-
         resultado = {"tipo": clasificacion, "df": None, "analisis": None, "texto": None}
 
         if clasificacion == "analista":
@@ -249,7 +213,6 @@ def orquestador(pregunta_usuario: str, historial_chat: list):
                             df_en_memoria = df_previo
                             st.info("🧠 Usando la última tabla mostrada para el análisis.", icon="💾")
                             break
-            
             if df_en_memoria is not None:
                 analisis = analizar_con_datos(pregunta_usuario, df_en_memoria)
                 resultado["analisis"] = analisis
@@ -258,37 +221,30 @@ def orquestador(pregunta_usuario: str, historial_chat: list):
                 pregunta_sql = extraer_pregunta_para_sql(pregunta_usuario)
                 res_datos = obtener_datos_sql(pregunta_sql)
                 resultado.update(res_datos)
-                
                 if res_datos.get("df") is not None and not res_datos["df"].empty:
                     analisis = analizar_con_datos(pregunta_usuario, res_datos["df"])
                     resultado["analisis"] = analisis
                 else:
                     resultado["texto"] = "No pude obtener los datos necesarios para realizar el análisis."
-        
-        else: # Si es 'consulta'
+        else:
             res_datos = obtener_datos_sql(pregunta_usuario)
             resultado.update(res_datos)
-    
     return resultado
 
 # ============================================
-# 3) Interfaz de Chat de Streamlit (MODIFICADA)
+# 3) Interfaz de Chat de Streamlit
 # ============================================
 
-# Función unificada para procesar la pregunta (de texto o de voz)
+# Función unificada para procesar la pregunta
 def procesar_pregunta(prompt: str):
-    # Guardar y mostrar pregunta del usuario
-    user_message = {"role": "user", "content": {"pregunta": prompt}}
-    st.session_state.messages.append(user_message)
+    if not prompt:
+        return
+    st.session_state.messages.append({"role": "user", "content": {"pregunta": prompt}})
     with st.chat_message("user"):
         st.markdown(prompt)
-
-    # Generar y mostrar respuesta del asistente
     with st.chat_message("assistant"):
         res = orquestador(prompt, st.session_state.messages)
-        
         response_content = {}
-        
         if res.get("analisis"):
             st.markdown(res["analisis"])
             response_content["analisis"] = res["analisis"]
@@ -301,49 +257,89 @@ def procesar_pregunta(prompt: str):
         elif res.get("texto"):
             st.markdown(res["texto"])
             response_content["texto_plano"] = res["texto"]
-        
         if response_content:
-            assistant_message = {"role": "assistant", "content": response_content}
-            st.session_state.messages.append(assistant_message)
+            st.session_state.messages.append({"role": "assistant", "content": response_content})
 
 # Iniciar historial si no existe
 if "messages" not in st.session_state:
     st.session_state.messages = []
+if "prompt_de_audio" not in st.session_state:
+    st.session_state.prompt_de_audio = None
 
-# Mostrar historial de mensajes
+# Mostrar historial
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         content = message["content"]
-        if "pregunta" in content:
-            st.markdown(content["pregunta"])
-        if isinstance(content.get("df"), pd.DataFrame) and not content["df"].empty:
-            st.dataframe(content["df"])
-        if content.get("analisis"):
-            st.markdown(content["analisis"])
-        if content.get("texto_plano"):
-            st.markdown(content["texto_plano"])
+        if "pregunta" in content: st.markdown(content["pregunta"])
+        if isinstance(content.get("df"), pd.DataFrame) and not content["df"].empty: st.dataframe(content["df"])
+        if content.get("analisis"): st.markdown(content["analisis"])
+        if content.get("texto_plano"): st.markdown(content["texto_plano"])
 
-# NUEVO: Lógica de la interfaz de usuario con texto y voz
-col1, col2 = st.columns([4, 1])
+# Lógica de la interfaz
+prompt_texto = st.chat_input("Ej: 'Muéstrame la facturación total por rubro'")
 
-with col1:
-    prompt_texto = st.chat_input("Ej: 'Muéstrame la facturación total por rubro'")
+# ========== NUEVA SECCIÓN DE AUDIO CON WEBRTC ==========
+st.sidebar.header("Pregunta por Voz 🎙️")
+status_indicator = st.sidebar.empty()
 
-with col2:
-    st.write(" ") # Espaciador para alinear
-    audio = audiorecorder("▶️ Grabar", "⏹️ Detener", key="audio_recorder")
+class AudioTranscriber(AudioProcessorBase):
+    def __init__(self):
+        self.audio_buffer = io.BytesIO()
+        self.sample_rate = 16000 # Frecuencia de muestreo
+        self.is_recording = False
 
-# Procesar la entrada de texto si existe
+    def recv(self, frame: av.AudioFrame) -> av.AudioFrame:
+        if self.is_recording:
+            # Convierte el frame a un formato que podamos usar (numpy array)
+            audio_data = frame.to_ndarray(format='s16')
+            # Escribe los datos en el buffer
+            self.audio_buffer.write(audio_data.tobytes())
+        return frame
+
+# Componente de WebRTC
+webrtc_ctx = webrtc_streamer(
+    key="audio-recorder",
+    mode=WebRtcMode.SEND_ONLY,
+    audio_processor_factory=AudioTranscriber,
+    media_stream_constraints={"video": False, "audio": True},
+)
+
+# Botones de control en la barra lateral
+if webrtc_ctx.audio_processor:
+    if not webrtc_ctx.audio_processor.is_recording:
+        if st.sidebar.button("▶️ Iniciar Grabación"):
+            webrtc_ctx.audio_processor.is_recording = True
+            status_indicator.info("Grabando...")
+    else:
+        if st.sidebar.button("⏹️ Detener y Procesar"):
+            webrtc_ctx.audio_processor.is_recording = False
+            status_indicator.info("Procesando audio...")
+            
+            # Convertir el buffer a un archivo WAV en memoria
+            self.audio_buffer.seek(0)
+            wav_buffer = io.BytesIO()
+            write(wav_buffer, webrtc_ctx.audio_processor.sample_rate, np.frombuffer(self.audio_buffer.getvalue(), dtype=np.int16))
+            
+            # Transcribir
+            try:
+                audio_file = genai.upload_file(path=wav_buffer, display_name="grabacion_st_webrtc", mime_type="audio/wav")
+                model = genai.GenerativeModel('models/gemini-1.5-pro-latest')
+                response = model.generate_content(["Por favor, transcribe este audio.", audio_file])
+                genai.delete_file(audio_file.name)
+                st.session_state.prompt_de_audio = response.text.strip()
+                status_indicator.success("Transcripción lista. Enviando pregunta...")
+            except Exception as e:
+                status_indicator.error(f"Error en transcripción: {e}")
+            
+            webrtc_ctx.audio_processor.audio_buffer.truncate(0)
+            webrtc_ctx.audio_processor.audio_buffer.seek(0)
+
+# Procesar la entrada de texto
 if prompt_texto:
     procesar_pregunta(prompt_texto)
 
-# Procesar la entrada de audio si existe
-if len(audio) > 0:
-    # Exportar los bytes del audio
-    audio_bytes = audio.export().read()
-    # Transcribir el audio
-    prompt_audio = transcribir_audio_con_gemini(audio_bytes)
-    if prompt_audio:
-        # Procesar la pregunta transcrita
-        procesar_pregunta(prompt_audio)
-    
+# Procesar la entrada de voz (si hay una nueva transcripción)
+if st.session_state.prompt_de_audio:
+    procesar_pregunta(st.session_state.prompt_de_audio)
+    st.session_state.prompt_de_audio = None # Limpiar para no reenviar
+    st.rerun() # Forzar un re-render para mostrar la pregunta inmediatamente
