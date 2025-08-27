@@ -94,6 +94,7 @@ def ejecutar_sql_real(pregunta_usuario: str):
     st.info("🤖 Traduciendo tu pregunta a consulta SQL...", icon="➡️")
     prompt = f"""
     Considerando la pregunta del usuario, genera una consulta SQL.
+    **IMPORTANTE**: NUNCA limites el número de resultados (NO uses la cláusula LIMIT).
     Pregunta original: "{pregunta_usuario}"
     """
     try:
@@ -270,6 +271,7 @@ if prompt := st.chat_input("Ej: 'Muéstrame la facturación total por rubro'"):
         if response_content:
             assistant_message = {"role": "assistant", "content": response_content}
             st.session_state.messages.append(assistant_message)
+
 
 
 
