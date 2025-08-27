@@ -5,10 +5,10 @@ import pandas as pd
 import re
 from sqlalchemy import text
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.sql_database import SQLDatabase
-from langchain.agents import create_sql_agent
-from langchain.agents.agent_toolkits import SQLDatabaseToolkit
 from langchain.chains import create_sql_query_chain
+from langchain_community.utilities import SQLDatabase
+from langchain_community.agent_toolkits.sql.base import create_sql_agent
+from langchain_community.agent_toolkits.sql.toolkit import SQLDatabaseToolkit
 
 # ============================================
 # 0) Configuración de la Página
@@ -269,4 +269,5 @@ if prompt := st.chat_input("Ej: 'Muéstrame la facturación total por rubro'"):
         if response_content:
             assistant_message = {"role": "assistant", "content": response_content}
             st.session_state.messages.append(assistant_message)
+
 
