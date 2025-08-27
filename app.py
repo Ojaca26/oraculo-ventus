@@ -1,4 +1,4 @@
-# app.py (versión final con streamlit-webrtc para audio)
+# app.py
 
 import streamlit as st
 import pandas as pd
@@ -299,7 +299,7 @@ class AudioTranscriber(AudioProcessorBase):
 # Componente de WebRTC
 webrtc_ctx = webrtc_streamer(
     key="audio-recorder",
-    mode=WebRtcMode.SEND_ONLY,
+    mode=WebRtcMode.SENDONLY,
     audio_processor_factory=AudioTranscriber,
     media_stream_constraints={"video": False, "audio": True},
 )
@@ -343,3 +343,4 @@ if st.session_state.prompt_de_audio:
     procesar_pregunta(st.session_state.prompt_de_audio)
     st.session_state.prompt_de_audio = None # Limpiar para no reenviar
     st.rerun() # Forzar un re-render para mostrar la pregunta inmediatamente
+
