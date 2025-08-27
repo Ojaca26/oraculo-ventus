@@ -1,4 +1,3 @@
-# requirements.txt (Corregido)
 streamlit
 pandas
 langchain-google-genai
@@ -9,3 +8,6 @@ PyMySQL
 google-generativeai
 streamlit-webrtc
 pydub
+numpy
+scipy
+av
