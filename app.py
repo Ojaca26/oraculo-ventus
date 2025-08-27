@@ -1,8 +1,8 @@
-# app.py (versión con memoria y limpieza de SQL robustas)
+# app.py (versión final con separador de tareas para evitar alucinaciones)
 
 import streamlit as st
 import pandas as pd
-import re # Importamos la librería de expresiones regulares
+import re
 from sqlalchemy import text
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_community.utilities import SQLDatabase
@@ -18,12 +18,12 @@ st.title("🔮 Oráculo de Datos Ventus")
 st.caption("Tu asistente IA para consultas y análisis de datos. Haz una pregunta y obtén respuestas al instante.")
 
 # ============================================
-# 1) Conexión a la Base de Datos y LLMs (con caché para eficiencia)
+# 1) Conexión a la Base de Datos y LLMs
 # ============================================
 
 @st.cache_resource
 def get_database_connection():
-    # ... (Esta función no cambia, la dejamos como está)
+    # ... (Sin cambios)
     with st.spinner("🔌 Conectando a la base de datos..."):
         try:
             db_user = st.secrets["db_credentials"]["user"]
@@ -40,11 +40,11 @@ def get_database_connection():
 
 @st.cache_resource
 def get_llms():
-    # ... (Esta función no cambia)
+    # ... (Sin cambios)
     with st.spinner("🧠 Inicializando modelos de IA..."):
         try:
             api_key = st.secrets["google_api_key"]
-            llm_sql = ChatGoogleGenerativeAI(model="models/gemini-1.5-pro", temperature=0.1, google_api_key=api_key)
+            llm_sql = ChatGoogleGenerativeAI(model="models/gemini-1.5-pro", temperature=0.0, google_api_key=api_key)
             llm_analista = ChatGoogleGenerativeAI(model="models/gemini-1.5-pro", temperature=0.3, google_api_key=api_key)
             llm_orq = ChatGoogleGenerativeAI(model="models/gemini-1.5-pro", temperature=0.0, google_api_key=api_key)
             st.success("✅ Modelos de IA listos.")
@@ -58,7 +58,7 @@ llm_sql, llm_analista, llm_orq = get_llms()
 
 @st.cache_resource
 def get_sql_agent(_llm, _db):
-    # ... (Esta función no cambia)
+    # ... (Sin cambios)
     with st.spinner("🛠️ Configurando agente SQL..."):
         toolkit = SQLDatabaseToolkit(db=_db, llm=_llm)
         agent = create_sql_agent(llm=_llm, toolkit=toolkit, verbose=False)
@@ -72,7 +72,7 @@ agente_sql = get_sql_agent(llm_sql, db)
 # ============================================
 
 def markdown_table_to_df(texto: str) -> pd.DataFrame:
-    # ... (Esta función no cambia)
+    # ... (Sin cambios)
     lineas = [l.strip() for l in texto.splitlines() if l.strip().startswith('|')]
     if not lineas: return pd.DataFrame()
     lineas = [l for l in lineas if not re.match(r'^\|\s*-', l)]
@@ -87,39 +87,51 @@ def markdown_table_to_df(texto: str) -> pd.DataFrame:
     return df
 
 def _df_preview(df: pd.DataFrame, n: int = 20) -> str:
-    # ... (Esta función no cambia)
+    # ... (Sin cambios)
     if df is None or df.empty: return "No hay datos en la tabla."
     try: return df.head(n).to_markdown(index=False)
     except Exception: return df.head(n).to_string(index=False)
 
 def limpiar_y_extraer_sql(texto_con_sql: str) -> str:
-    """Usa expresiones regulares para extraer el comando SQL puro."""
-    # Busca un bloque entre ```sql y ``` o la primera instrucción SELECT
+    # ... (Sin cambios)
     match = re.search(r"```sql(.*?)```|SELECT.*?;", texto_con_sql, re.DOTALL | re.IGNORECASE)
     if match:
-        # Si encuentra un bloque ```sql, toma su contenido. De lo contrario, toma toda la coincidencia (el SELECT)
         sql_puro = match.group(1) if match.group(1) else match.group(0)
         return sql_puro.strip()
-    return texto_con_sql # Devuelve el original si no encuentra un patrón claro
+    return texto_con_sql
+
+# ========== NUEVA FUNCIÓN "GERENTE" ==========
+def extraer_pregunta_para_sql(pregunta_compleja: str) -> str:
+    """Toma una pregunta de análisis y la convierte en una pregunta para la base de datos."""
+    st.info("🧠 Reformulando la pregunta para el agente de SQL...", icon="🤔")
+    prompt_extractor = f"""
+    A partir de la siguiente solicitud de un usuario, extrae únicamente la pregunta específica sobre los datos que se necesita para responderla.
+    Tu objetivo es crear una pregunta clara y concisa que pueda ser respondida con una consulta SQL.
+    Por ejemplo, si el usuario pide "Analiza el comportamiento de la facturación de este año", tu deberías extraer "dame la facturación de este año".
+    Si pide "Cuál es la tendencia de ventas del último trimestre", extrae "dame las ventas del último trimestre".
+
+    Solicitud original: "{pregunta_compleja}"
+    
+    Extrae la pregunta para la base de datos:
+    """
+    pregunta_extraida = llm_orq.invoke(prompt_extractor).content.strip()
+    st.info(f"📝 Pregunta para SQL: '{pregunta_extraida}'")
+    return pregunta_extraida
 
 def ejecutar_sql_real(pregunta_usuario: str):
+    # ... (Sin cambios)
     st.info("🤖 Traduciendo tu pregunta a consulta SQL...", icon="➡️")
     prompt = f"""
     Considerando la pregunta del usuario, genera una consulta SQL para la base de datos MariaDB.
-
-    **IMPORTANTE:**
-    1.  **NUNCA limites el número de resultados (NO uses la cláusula LIMIT) a menos que el usuario pida explícitamente un número pequeño de filas como "los 5 primeros" o "una muestra".**
-    2.  Si la pregunta es abierta como "dame la facturación", asume que el usuario quiere ver todos los registros relevantes.
-
+    IMPORTANTE:
+    1. NUNCA limites los resultados (NO uses LIMIT) a menos que el usuario pida explícitamente un número pequeño de filas.
+    2. Si la pregunta es abierta, asume que el usuario quiere ver todos los registros relevantes.
     Pregunta original: "{pregunta_usuario}"
     """
     try:
         query_chain = create_sql_query_chain(llm_sql, db)
         respuesta_llm = query_chain.invoke({"question": prompt})
-        
-        # MODIFICACIÓN CLAVE: Usamos la nueva función de limpieza
         sql_query = limpiar_y_extraer_sql(respuesta_llm)
-        
         st.code(sql_query, language='sql')
         with st.spinner("⏳ Ejecutando consulta en la base de datos..."):
             with db._engine.connect() as conn:
@@ -131,29 +143,26 @@ def ejecutar_sql_real(pregunta_usuario: str):
         return {"sql": None, "df": None, "error": str(e)}
 
 def ejecutar_sql_en_lenguaje_natural(pregunta_usuario: str):
-    # ... (Esta función no cambia)
+    # ... (Sin cambios)
     st.info("🤔 Activando agente SQL experto como plan B...", icon="➡️")
     prompt = f'Responde consultando la BD. Devuelve un resultado legible en tabla/resumen. Pregunta: "{pregunta_usuario}"'
     try:
         with st.spinner("💬 Consultando con el agente experto..."):
             res = agente_sql.invoke(prompt)
             texto = res["output"] if isinstance(res, dict) else str(res)
-        
         df_md = markdown_table_to_df(texto)
-        
         if not df_md.empty:
             st.success("✅ Agente experto obtuvo y procesó los datos.")
             return {"texto": None, "df": df_md}
         else:
             st.warning("⚠️ El agente experto respondió, pero no en formato de tabla.", icon="📝")
             return {"texto": texto, "df": pd.DataFrame()}
-            
     except Exception as e:
         st.error(f"❌ El agente SQL experto también falló: {e}", icon="🚨")
         return {"texto": f"[SQL_ERROR] {e}", "df": pd.DataFrame()}
 
 def analizar_con_datos(pregunta_usuario: str, df: pd.DataFrame):
-    # ... (Esta función no cambia)
+    # ... (Sin cambios)
     st.info("🧠 Analista experto examinando los datos...", icon="➡️")
     df_resumen = _df_preview(df)
     prompt_analisis = f"""
@@ -161,18 +170,18 @@ def analizar_con_datos(pregunta_usuario: str, df: pd.DataFrame):
     Pregunta del usuario: "{pregunta_usuario}"
     Basado en la siguiente tabla de datos:
     {df_resumen}
-    Análisis Ejecutivo de Datos,
-    Cuando recibas una tabla de resultados (facturación, ventas, métricas, etc.), realiza el siguiente análisis:
-    1. Calcular totales y porcentajes clave (participación de facturas grandes, distribución por días, % acumulado).
-    2. Detectar concentración (si pocos registros explican gran parte del total).
-    3. Identificar patrones temporales (días o periodos con concentración inusual).
-    4. Analizar dispersión (ticket promedio, comparación entre valores grandes vs pequeños).
+Análisis Ejecutivo de Datos,
+Cuando recibas una tabla de resultados (facturación, ventas, métricas, etc.), realiza el siguiente análisis:
+1. Calcular totales y porcentajes clave (participación de facturas grandes, distribución por días, % acumulado).
+2. Detectar concentración (si pocos registros explican gran parte del total).
+3. Identificar patrones temporales (días o periodos con concentración inusual).
+4. Analizar dispersión (ticket promedio, comparación entre valores grandes vs pequeños).
 
-    Entregar el resultado en 3 bloques:
-    📌 Resumen Ejecutivo: hallazgos principales con números.
-    🔍 Números de referencia: totales, promedios, ratios comparativos.
+Entregar el resultado en 3 bloques:
+📌 Resumen Ejecutivo: hallazgos principales con números.
+🔍 Números de referencia: totales, promedios, ratios comparativos.
 
-    ⚠ Importante: No describas lo obvio de la tabla. Sé muy breve, directo y diciente, con frases cortas en bullets que un gerente pueda leer en 1 minuto.
+⚠ Importante: No describas lo obvio de la tabla. Sé muy breve, directo y diciente, con frases cortas en bullets que un gerente pueda leer en 1 minuto.
     """
     with st.spinner("💡 Generando análisis y recomendaciones..."):
         analisis = llm_analista.invoke(prompt_analisis).content
@@ -180,23 +189,20 @@ def analizar_con_datos(pregunta_usuario: str, df: pd.DataFrame):
     return analisis
 
 def clasificar_intencion(pregunta: str) -> str:
-    # ... (Esta función no cambia)
-    prompt_orq = f"""
-    Devuelve UNA sola palabra: `consulta` (si pide datos) o `analista` (si pide interpretar/analizar).
-    Mensaje: "{pregunta}"
-    """
+    # ... (Sin cambios)
+    prompt_orq = f'Devuelve UNA sola palabra: `consulta` (si pide datos) o `analista` (si pide interpretar/analizar). Mensaje: "{pregunta}"'
     clasificacion = llm_orq.invoke(prompt_orq).content.strip().lower().replace('"', '').replace("'", "")
     return "analista" if "analista" in clasificacion else "consulta"
 
 def obtener_datos_sql(pregunta_usuario: str) -> dict:
-    # ... (Esta función no cambia)
+    # ... (Sin cambios)
     res_real = ejecutar_sql_real(pregunta_usuario)
     if res_real.get("df") is not None and not res_real["df"].empty:
         return res_real
     return ejecutar_sql_en_lenguaje_natural(pregunta_usuario)
 
+# ========== ORQUESTADOR MODIFICADO ==========
 def orquestador(pregunta_usuario: str, historial_chat: list):
-    # ... (Esta función no cambia)
     with st.expander("⚙️ Ver Proceso del Agente", expanded=False):
         st.info(f"🚀 Recibido: '{pregunta_usuario}'")
         with st.spinner("🔍 Analizando tu pregunta..."):
@@ -208,29 +214,31 @@ def orquestador(pregunta_usuario: str, historial_chat: list):
         if clasificacion == "analista":
             df_en_memoria = None
             if historial_chat:
-                # Revisa el historial desde el final para encontrar la última tabla
-                for i in range(len(historial_chat) - 1, -1, -1):
-                    mensaje_previo = historial_chat[i]
+                for mensaje_previo in reversed(historial_chat):
                     if mensaje_previo["role"] == "assistant" and "df" in mensaje_previo["content"]:
                         df_previo = mensaje_previo["content"]["df"]
                         if isinstance(df_previo, pd.DataFrame) and not df_previo.empty:
                             df_en_memoria = df_previo
                             st.info("🧠 Usando la última tabla mostrada para el análisis.", icon="💾")
-                            break # Detiene la búsqueda al encontrar la primera tabla
+                            break
             
             if df_en_memoria is not None:
+                # Si hay tabla en memoria, la usamos directamente para el análisis
                 analisis = analizar_con_datos(pregunta_usuario, df_en_memoria)
                 resultado["analisis"] = analisis
                 resultado["df"] = df_en_memoria
             else:
-                st.warning("⚠️ No encontré una tabla reciente. Buscaré los datos de nuevo.", icon="🔍")
-                res_datos = obtener_datos_sql(pregunta_usuario)
+                # Si NO hay tabla en memoria, usamos la nueva función "gerente"
+                pregunta_sql = extraer_pregunta_para_sql(pregunta_usuario)
+                res_datos = obtener_datos_sql(pregunta_sql)
                 resultado.update(res_datos)
+                
                 if res_datos.get("df") is not None and not res_datos["df"].empty:
+                    # Usamos la pregunta original del usuario para el análisis, no la extraída
                     analisis = analizar_con_datos(pregunta_usuario, res_datos["df"])
                     resultado["analisis"] = analisis
                 else:
-                    resultado["texto"] = "No pude obtener datos para analizar."
+                    resultado["texto"] = "No pude obtener los datos necesarios para realizar el análisis."
         
         else: # Si es 'consulta'
             res_datos = obtener_datos_sql(pregunta_usuario)
@@ -247,7 +255,7 @@ if "messages" not in st.session_state:
 
 # Mostrar historial
 for message in st.session_state.messages:
-    # ... (Esta sección no cambia)
+    # ... (Sin cambios)
     with st.chat_message(message["role"]):
         content = message["content"]
         if "pregunta" in content:
@@ -261,13 +269,12 @@ for message in st.session_state.messages:
 
 # Input del usuario
 if prompt := st.chat_input("Ej: 'Muéstrame la facturación total por rubro'"):
-    # Guardar y mostrar pregunta del usuario
+    # ... (Sin cambios en esta sección)
     user_message = {"role": "user", "content": {"pregunta": prompt}}
     st.session_state.messages.append(user_message)
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Generar y mostrar respuesta del asistente
     with st.chat_message("assistant"):
         res = orquestador(prompt, st.session_state.messages)
         
@@ -279,11 +286,9 @@ if prompt := st.chat_input("Ej: 'Muéstrame la facturación total por rubro'"):
             if isinstance(res.get("df"), pd.DataFrame) and not res["df"].empty:
                  st.dataframe(res["df"])
                  response_content["df"] = res["df"]
-
         elif isinstance(res.get("df"), pd.DataFrame) and not res["df"].empty:
             st.dataframe(res["df"])
             response_content["df"] = res["df"]
-        
         elif res.get("texto"):
             st.markdown(res["texto"])
             response_content["texto_plano"] = res["texto"]
