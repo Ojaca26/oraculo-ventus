@@ -99,6 +99,7 @@ def ejecutar_sql_real(pregunta_usuario: str):
     try:
         query_chain = create_sql_query_chain(llm_sql, db)
         sql_query = query_chain.invoke({"question": prompt})
+        sql_query = sql_query.replace("```sql", "").replace("```", "").strip()
         st.code(sql_query.strip(), language='sql')
         with st.spinner("⏳ Ejecutando consulta en la base de datos..."):
             with db._engine.connect() as conn:
@@ -269,5 +270,6 @@ if prompt := st.chat_input("Ej: 'Muéstrame la facturación total por rubro'"):
         if response_content:
             assistant_message = {"role": "assistant", "content": response_content}
             st.session_state.messages.append(assistant_message)
+
 
 
