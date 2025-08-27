@@ -5,3 +5,5 @@ langchain
 langchain-community
 SQLAlchemy
 PyMySQL
+streamlit-audiorecorder
+google-generativeai
